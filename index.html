@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stream Channel Parser (No UI Input)</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #f4f7fc;
+            margin: 0;
+            padding: 20px;
+            color: #333;
+        }
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 8px 20px rgba(0,0,0,0.1);
+            padding: 30px;
+        }
+        h1 {
+            color: #2c3e50;
+            border-bottom: 2px solid #3498db;
+            padding-bottom: 10px;
+        }
+        .info {
+            background: #e9ecef;
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        th, td {
+            border: 1px solid #dee2e6;
+            padding: 10px;
+            text-align: left;
+            word-break: break-all;
+        }
+        th {
+            background: #e9ecef;
+        }
+        .error {
+            color: #e74c3c;
+            background: #fadbd7;
+            padding: 12px;
+            border-radius: 8px;
+            margin-top: 15px;
+        }
+        .loader {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #3498db;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        footer {
+            margin-top: 30px;
+            text-align: center;
+            font-size: 12px;
+            color: #6c757d;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>📡 Universal Stream Channel Parser</h1>
+    <div class="info">
+        <strong>How to use:</strong><br>
+        This page expects data via URL query parameters. No manual input.<br>
+        <code>?url=&lt;url&gt;&parser=&lt;type&gt;</code> – fetches content from the URL and parses.<br>
+        <code>?data=&lt;content&gt;&parser=&lt;type&gt;</code> – parses the raw content directly.<br>
+        <code>?parser=&lt;type&gt;</code> – uses the fallback sample.<br>
+        Supported parsers: m3u, json, webpage, direct, iframe, xml, rss, xspf, csv, pls, text.
+    </div>
+    <div id="resultArea">
+        <div id="status">Waiting for parameters...</div>
+    </div>
+    <footer>No input fields – all data from URL | CORS may block external fetches; use data parameter instead.</footer>
+</div>
+
+<script>
+    // ---------- Helper Functions ----------
+    function isStreamUrl(url) {
+        const patterns = [/\\.m3u8($|\\?)/i, /\\.m3u($|\\?)/i, /\\.mpd($|\\?)/i, /\\.ts($|\\?)/i,
+                          /manifest\\.mpd/i, /master\\.m3u8/i, /playlist\\.m3u8/i, /\\.mp4($|\\?)/i,
+                          /\\.flv($|\\?)/i, /\\.mkv($|\\?)/i];
+        return patterns.some(p => p.test(url));
+    }
+
+    async function fetchUrl(url) {
+        const response = await fetch(url, { mode: 'cors' });
+        if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        return await response.text();
+    }
+
+    // ---------- Parsers ----------
+    function parseM3U(content) {
+        const channels = [];
+        const lines = content.split(/\r?\n/);
+        let i = 0;
+        while (i < lines.length) {
+            let line = lines[i].trim();
+            if (line.startsWith('#EXTINF')) {
+                const nameMatch = line.match(/#EXTINF:[^,]*,?(.+)$/);
+                const name = nameMatch ? nameMatch[1].trim() : 'Unknown';
+                i++;
+                if (i < lines.length) {
+                    let url = lines[i].trim();
+                    if (url && !url.startsWith('#')) {
+                        channels.push({ name, url });
+                    }
+                }
+            } else if (line.startsWith('#EXT-X-STREAM-INF') || line.startsWith('#EXT-X-MEDIA')) {
+                i++;
+                if (i < lines.length) {
+                    let url = lines[i].trim();
+                    if (url && !url.startsWith('#')) {
+                        channels.push({ name: `Variant (${url.split('/').pop()})`, url });
+                    }
+                }
+            }
+            i++;
+        }
+        return channels;
+    }
+
+    function parseJSON(content) {
+        try {
+            const data = JSON.parse(content);
+            let channels = [];
+            if (Array.isArray(data)) {
+                channels = data.map(item => ({
+                    name: item.name || item.title || 'Unnamed',
+                    url: item.url || item.stream || ''
+                }));
+            } else if (data.channels && Array.isArray(data.channels)) {
+                channels = data.channels.map(item => ({
+                    name: item.name || item.title || 'Unnamed',
+                    url: item.url || item.stream || ''
+                }));
+            } else if (data.items && Array.isArray(data.items)) {
+                channels = data.items.map(item => ({
+                    name: item.name || item.title || 'Unnamed',
+                    url: item.url || item.stream || ''
+                }));
+            } else {
+                for (let key in data) {
+                    if (data[key] && typeof data[key] === 'object' && data[key].url) {
+                        channels.push({
+                            name: data[key].name || key,
+                            url: data[key].url
+                        });
+                    }
+                }
+            }
+            return channels.filter(ch => ch.url && ch.url.trim());
+        } catch (e) {
+            throw new Error(`Invalid JSON: ${e.message}`);
+        }
+    }
+
+    function parseWebpage(html, baseUrl = '') {
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(html, 'text/html');
+        const channels = [];
+        // Links
+        doc.querySelectorAll('a[href]').forEach(a => {
+            let href = a.getAttribute('href');
+            if (href) {
+                let fullUrl = href;
+                if (baseUrl && !href.startsWith('http')) {
+                    try {
+                        fullUrl = new URL(href, baseUrl).href;
+                    } catch(e) {}
+                }
+                if (isStreamUrl(fullUrl)) {
+                    const name = a.textContent.trim() || a.getAttribute('title') || 'Stream Link';
+                    channels.push({ name, url: fullUrl });
+                }
+            }
+        });
+        // iframes
+        doc.querySelectorAll('iframe[src]').forEach(iframe => {
+            let src = iframe.getAttribute('src');
+            if (src) {
+                let fullUrl = src;
+                if (baseUrl && !src.startsWith('http')) {
+                    try {
+                        fullUrl = new URL(src, baseUrl).href;
+                    } catch(e) {}
+                }
+                if (isStreamUrl(fullUrl)) {
+                    const name = iframe.getAttribute('title') || 'iFrame Stream';
+                    channels.push({ name, url: fullUrl });
+                }
+            }
+        });
+        // video/source
+        doc.querySelectorAll('video source, video').forEach(el => {
+            let src = el.getAttribute('src');
+            if (src && isStreamUrl(src)) {
+                let fullUrl = src;
+                if (baseUrl && !src.startsWith('http')) {
+                    try {
+                        fullUrl = new URL(src, baseUrl).href;
+                    } catch(e) {}
+                }
+                channels.push({ name: 'Video Stream', url: fullUrl });
+            }
+        });
+        // deduplicate by URL
+        const seen = new Set();
+        return channels.filter(ch => {
+            if (seen.has(ch.url)) return false;
+            seen.add(ch.url);
+            return true;
+        });
+    }
+
+    function parseDirect(url) {
+        if (!isStreamUrl(url)) throw new Error('URL does not look like a stream');
+        return [{ name: 'Direct Stream', url }];
+    }
+
+    function parseIframe(html) {
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(html, 'text/html');
+        const iframes = doc.querySelectorAll('iframe[src]');
+        if (!iframes.length) throw new Error('No iframe found');
+        return Array.from(iframes).map((iframe, idx) => ({
+            name: iframe.getAttribute('title') || `iFrame ${idx+1}`,
+            url: iframe.getAttribute('src')
+        }));
+    }
+
+    function parseXML(content) {
+        const parser = new DOMParser();
+        const xmlDoc = parser.parseFromString(content, 'text/xml');
+        // Check for parsing errors
+        const parseError = xmlDoc.querySelector('parsererror');
+        if (parseError) throw new Error('Invalid XML');
+        const channels = [];
+        // Try XMLTV style <channel> with <display-name> and <url>
+        const channelsXML = xmlDoc.querySelectorAll('channel');
+        channelsXML.forEach(ch => {
+            const nameElem = ch.querySelector('display-name');
+            const name = nameElem ? nameElem.textContent : (ch.getAttribute('id') || 'Unknown');
+            const urlElem = ch.querySelector('url');
+            const url = urlElem ? urlElem.textContent : null;
+            if (url) channels.push({ name, url });
+        });
+        if (channels.length) return channels;
+        // Try generic: find any element with child <name> and <url>
+        const allElems = xmlDoc.querySelectorAll('*');
+        allElems.forEach(elem => {
+            let name = null, url = null;
+            elem.querySelectorAll('*').forEach(child => {
+                const tag = child.tagName.toLowerCase();
+                if (tag === 'name' || tag === 'title' || tag === 'channel') name = child.textContent;
+                if (tag === 'url' || tag === 'link' || tag === 'src') url = child.textContent;
+            });
+            if (name && url) channels.push({ name, url });
+        });
+        return channels;
+    }
+
+    function parseRSS(content) {
+        const parser = new DOMParser();
+        const xmlDoc = parser.parseFromString(content, 'text/xml');
+        if (xmlDoc.querySelector('parsererror')) throw new Error('Invalid RSS/XML');
+        const channels = [];
+        const items = xmlDoc.querySelectorAll('item');
+        items.forEach(item => {
+            const titleElem = item.querySelector('title');
+            const title = titleElem ? titleElem.textContent : 'RSS Item';
+            const enclosure = item.querySelector('enclosure');
+            let url = enclosure ? enclosure.getAttribute('url') : null;
+            if (!url) {
+                const linkElem = item.querySelector('link');
+                if (linkElem && linkElem.textContent && isStreamUrl(linkElem.textContent))
+                    url = linkElem.textContent;
+            }
+            if (url) channels.push({ name: title, url });
+        });
+        return channels;
+    }
+
+    function parseXSPF(content) {
+        const parser = new DOMParser();
+        const xmlDoc = parser.parseFromString(content, 'text/xml');
+        if (xmlDoc.querySelector('parsererror')) throw new Error('Invalid XSPF');
+        const channels = [];
+        const tracks = xmlDoc.querySelectorAll('track');
+        tracks.forEach(track => {
+            const location = track.querySelector('location');
+            const title = track.querySelector('title');
+            if (location && location.textContent) {
+                channels.push({
+                    name: title ? title.textContent : 'XSPF Track',
+                    url: location.textContent
+                });
+            }
+        });
+        return channels;
+    }
+
+    function parseCSV(content) {
+        const lines = content.split(/\r?\n/).filter(l => l.trim());
+        if (!lines.length) return [];
+        const header = lines[0].split(',');
+        let nameIdx = -1, urlIdx = -1;
+        header.forEach((col, i) => {
+            const lc = col.toLowerCase();
+            if (lc.includes('name') || lc.includes('title') || lc.includes('channel')) nameIdx = i;
+            if (lc.includes('url') || lc.includes('link') || lc.includes('stream')) urlIdx = i;
+        });
+        if (nameIdx === -1 && urlIdx === -1 && header.length >= 2) {
+            nameIdx = 0; urlIdx = 1;
+        } else if (nameIdx === -1) nameIdx = 0;
+        else if (urlIdx === -1) urlIdx = 1;
+        const channels = [];
+        for (let i = 1; i < lines.length; i++) {
+            const parts = lines[i].split(',');
+            if (parts.length > Math.max(nameIdx, urlIdx)) {
+                const name = parts[nameIdx].trim();
+                const url = parts[urlIdx].trim();
+                if (url) channels.push({ name, url });
+            }
+        }
+        return channels;
+    }
+
+    function parsePLS(content) {
+        const channels = [];
+        const lines = content.split(/\r?\n/);
+        let current = null;
+        for (let line of lines) {
+            line = line.trim();
+            if (line.startsWith('File')) {
+                const url = line.split('=', 2)[1].trim();
+                current = { name: `PLS Entry ${channels.length+1}`, url };
+                channels.push(current);
+            } else if (line.startsWith('Title') && current) {
+                const title = line.split('=', 2)[1].trim();
+                current.name = title;
+            }
+        }
+        return channels;
+    }
+
+    function parseText(content) {
+        const channels = [];
+        const lines = content.split(/\r?\n/);
+        for (let line of lines) {
+            line = line.trim();
+            if (!line) continue;
+            if (line.includes(',')) {
+                const [name, url] = line.split(',', 2);
+                if (url && (isStreamUrl(url) || url.startsWith('http'))) {
+                    channels.push({ name: name.trim(), url: url.trim() });
+                }
+            } else {
+                if (isStreamUrl(line) || line.startsWith('http')) {
+                    channels.push({ name: 'URL Entry', url: line });
+                }
+            }
+        }
+        return channels;
+    }
+
+    // ---------- Main ----------
+    async function run() {
+        const urlParams = new URLSearchParams(window.location.search);
+        let parser = urlParams.get('parser');
+        let rawInput = urlParams.get('data');
+        let url = urlParams.get('url');
+        const statusDiv = document.getElementById('status');
+        const resultArea = document.getElementById('resultArea');
+
+        if (!parser) {
+            statusDiv.innerHTML = `<div class="error">No parser specified. Use ?parser=m3u (or other) and optionally &url=... or &data=...</div>`;
+            return;
+        }
+
+        // If both data and url are missing, show sample
+        if (!rawInput && !url) {
+            // Provide a built-in sample for demonstration
+            statusDiv.innerHTML = `<div class="info">No data provided. Using sample ${parser} data.</div>`;
+            rawInput = getSample(parser);
+        } else if (url) {
+            statusDiv.innerHTML = `<div class="info">Fetching from URL: ${escapeHtml(url)}... <span class="loader"></span></div>`;
+            try {
+                rawInput = await fetchUrl(url);
+                statusDiv.innerHTML = `<div class="info">Fetched successfully.</div>`;
+            } catch (err) {
+                statusDiv.innerHTML = `<div class="error">Error fetching URL: ${err.message}</div>`;
+                return;
+            }
+        }
+
+        statusDiv.innerHTML = `<div class="info">Parsing with "${parser}" ...</div>`;
+        try {
+            let channels = [];
+            switch (parser) {
+                case 'm3u': channels = parseM3U(rawInput); break;
+                case 'json': channels = parseJSON(rawInput); break;
+                case 'webpage': channels = parseWebpage(rawInput, url); break;
+                case 'direct': channels = parseDirect(rawInput); break;
+                case 'iframe': channels = parseIframe(rawInput); break;
+                case 'xml': channels = parseXML(rawInput); break;
+                case 'rss': channels = parseRSS(rawInput); break;
+                case 'xspf': channels = parseXSPF(rawInput); break;
+                case 'csv': channels = parseCSV(rawInput); break;
+                case 'pls': channels = parsePLS(rawInput); break;
+                case 'text': channels = parseText(rawInput); break;
+                default: throw new Error(`Unknown parser: ${parser}`);
+            }
+            if (channels.length === 0) {
+                statusDiv.innerHTML = `<div class="error">No channels found.</div>`;
+            } else {
+                displayChannels(channels);
+                statusDiv.innerHTML = `<div class="info">Found ${channels.length} channels.</div>`;
+            }
+        } catch (err) {
+            statusDiv.innerHTML = `<div class="error">Parsing error: ${err.message}</div>`;
+        }
+    }
+
+    function displayChannels(channels) {
+        const resultArea = document.getElementById('resultArea');
+        let html = '<h3>Extracted Channels</h3><table><thead><tr><th>#</th><th>Channel Name</th><th>Stream URL</th></tr></thead><tbody>';
+        channels.forEach((ch, idx) => {
+            html += `<tr>
+                        <td>${idx+1}</td>
+                        <td>${escapeHtml(ch.name)}</td>
+                        <td><a href="${escapeHtml(ch.url)}" target="_blank" rel="noopener">${escapeHtml(ch.url)}</a></td>
+                     </tr>`;
+        });
+        html += '</tbody></table>';
+        resultArea.innerHTML += html;
+    }
+
+    function getSample(parser) {
+        const samples = {
+            m3u: '#EXTM3U\n#EXTINF:-1,BBC One\nhttp://example.com/bbc1.m3u8\n#EXTINF:-1,CNN\nhttp://example.com/cnn.m3u8',
+            json: '[{"name":"BBC One","url":"http://example.com/bbc1.m3u8"},{"name":"CNN","url":"http://example.com/cnn.m3u8"}]',
+            webpage: '<html><body><a href="http://example.com/bbc1.m3u8">BBC One</a><iframe src="http://example.com/cnn.m3u8"></iframe></body></html>',
+            direct: 'http://example.com/live.m3u8',
+            iframe: '<iframe src="https://example.com/embed/channel1"></iframe><iframe src="https://example.com/embed/channel2"></iframe>',
+            xml: '<?xml version="1.0"?><channels><channel><name>BBC One</name><url>http://example.com/bbc1.m3u8</url></channel><channel><name>CNN</name><url>http://example.com/cnn.m3u8</url></channel></channels>',
+            rss: '<?xml version="1.0"?><rss version="2.0"><channel><item><title>BBC One</title><enclosure url="http://example.com/bbc1.m3u8"/></item><item><title>CNN</title><enclosure url="http://example.com/cnn.m3u8"/></item></channel></rss>',
+            xspf: '<?xml version="1.0"?><playlist version="1" xmlns="http://xspf.org/ns/0/"><trackList><track><title>BBC One</title><location>http://example.com/bbc1.m3u8</location></track><track><title>CNN</title><location>http://example.com/cnn.m3u8</location></track></trackList></playlist>',
+            csv: 'name,url\nBBC One,http://example.com/bbc1.m3u8\nCNN,http://example.com/cnn.m3u8',
+            pls: '[playlist]\nFile1=http://example.com/bbc1.m3u8\nTitle1=BBC One\nFile2=http://example.com/cnn.m3u8\nTitle2=CNN\nNumberOfEntries=2\nVersion=2',
+            text: 'http://example.com/bbc1.m3u8\nhttp://example.com/cnn.m3u8\nBBC One,http://example.com/bbc1.m3u8'
+        };
+        return samples[parser] || '';
+    }
+
+    function escapeHtml(str) {
+        if (!str) return '';
+        return str.replace(/[&<>]/g, function(m) {
+            if (m === '&') return '&amp;';
+            if (m === '<') return '&lt;';
+            if (m === '>') return '&gt;';
+            return m;
+        });
+    }
+
+    run();
+</script>
+</body>
+</html>
