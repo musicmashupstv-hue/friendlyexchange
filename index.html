@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Auto Playlist Parser (M3U + JSON + XMLTV)</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #f4f7fc;
+            margin: 0;
+            padding: 20px;
+            color: #333;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 8px 20px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        header {
+            background: #2c3e50;
+            color: white;
+            padding: 20px 30px;
+            text-align: center;
+        }
+        header h1 {
+            margin: 0;
+            font-size: 1.8rem;
+        }
+        header p {
+            margin: 5px 0 0;
+            opacity: 0.8;
+        }
+        .content {
+            padding: 30px;
+        }
+        .loader {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #3498db;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            vertical-align: middle;
+            margin-right: 10px;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .status {
+            background: #e9ecef;
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+            margin-top: 20px;
+        }
+        th, td {
+            border: 1px solid #dee2e6;
+            padding: 10px;
+            text-align: left;
+            vertical-align: top;
+        }
+        th {
+            background: #e9ecef;
+        }
+        .channel-url {
+            word-break: break-all;
+            max-width: 400px;
+        }
+        .error {
+            color: #e74c3c;
+            background: #fadbd7;
+            padding: 12px;
+            border-radius: 8px;
+            margin: 15px 0;
+        }
+        footer {
+            text-align: center;
+            padding: 15px;
+            background: #f1f3f5;
+            font-size: 12px;
+            color: #6c757d;
+        }
+        .param-info {
+            background: #d4edda;
+            padding: 8px;
+            border-radius: 6px;
+            margin-bottom: 15px;
+            font-size: 13px;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <header>
+        <h1>📡 Universal Playlist Parser</h1>
+        <p>Auto‑fetches M3U, JSON, and optional XMLTV via query parameters</p>
+    </header>
+    <div class="content">
+        <div id="paramInfo" class="param-info"></div>
+        <div id="status" class="status">
+            <span class="loader"></span> Loading playlists...
+        </div>
+        <div id="results"></div>
+    </div>
+    <footer>Data sources: rideofyourlife, m3uheaven, githubcousin | Proxy via vstlixxstream.vercel.app | Add ?xmltv=URL to parse XMLTV</footer>
+</div>
+
+<script>
+    // ----- Configuration -----
+    const SOURCES = [
+        {
+            name: "rideofyourlife (M3U)",
+            url: "https://raw.githubusercontent.com/musicmashupstv-hue/rideofyourlife/refs/heads/main/playlistslixx.m3u",
+            parser: "m3u"
+        },
+        {
+            name: "m3uheaven (M3U)",
+            url: "https://raw.githubusercontent.com/musicmashupstv-hue/m3uheaven/refs/heads/main/m3u",
+            parser: "m3u"
+        },
+        {
+            name: "githubcousin (JSON)",
+            url: "https://raw.githubusercontent.com/musicmashupstv-hue/githubcousin/refs/heads/main/playlists.json",
+            parser: "json"
+        }
+    ];
+
+    const PROXY_URL = "https://vstlixxstream.vercel.app/?url=";
+
+    // ----- Helper functions -----
+    function isStreamUrl(url) {
+        const patterns = [/\\.m3u8($|\\?)/i, /\\.m3u($|\\?)/i, /\\.mpd($|\\?)/i, /\\.ts($|\\?)/i,
+                          /manifest\\.mpd/i, /master\\.m3u8/i, /playlist\\.m3u8/i, /\\.mp4($|\\?)/i,
+                          /\\.flv($|\\?)/i, /\\.mkv($|\\?)/i];
+        return patterns.some(p => p.test(url));
+    }
+
+    async function fetchViaProxy(url) {
+        const proxyUrl = PROXY_URL + encodeURIComponent(url);
+        const response = await fetch(proxyUrl);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return await response.text();
+    }
+
+    // ----- Parsers -----
+    function parseM3U(content) {
+        const channels = [];
+        const lines = content.split(/\r?\n/);
+        let i = 0;
+        while (i < lines.length) {
+            let line = lines[i].trim();
+            if (line.startsWith('#EXTINF')) {
+                const nameMatch = line.match(/#EXTINF:[^,]*,?(.+)$/);
+                const name = nameMatch ? nameMatch[1].trim() : 'Unknown';
+                i++;
+                if (i < lines.length) {
+                    let url = lines[i].trim();
+                    if (url && !url.startsWith('#')) {
+                        channels.push({ name, url });
+                    }
+                }
+            } else if (line.startsWith('#EXT-X-STREAM-INF') || line.startsWith('#EXT-X-MEDIA')) {
+                i++;
+                if (i < lines.length) {
+                    let url = lines[i].trim();
+                    if (url && !url.startsWith('#')) {
+                        channels.push({ name: `Variant (${url.split('/').pop()})`, url });
+                    }
+                }
+            }
+            i++;
+        }
+        return channels;
+    }
+
+    function parseJSON(content) {
+        try {
+            const data = JSON.parse(content);
+            let channels = [];
+            if (Array.isArray(data)) {
+                channels = data.map(item => ({
+                    name: item.name || item.title || 'Unnamed',
+                    url: item.url || item.stream || ''
+                }));
+            } else if (data.playlists && Array.isArray(data.playlists)) {
+                channels = data.playlists.map(item => ({
+                    name: item.name || item.title || 'Unnamed',
+                    url: item.url || item.stream || ''
+                }));
+            } else if (data.items && Array.isArray(data.items)) {
+                channels = data.items.map(item => ({
+                    name: item.name || item.title || 'Unnamed',
+                    url: item.url || item.stream || ''
+                }));
+            } else {
+                for (let key in data) {
+                    if (data[key] && typeof data[key] === 'object' && data[key].url) {
+                        channels.push({
+                            name: data[key].name || key,
+                            url: data[key].url
+                        });
+                    }
+                }
+            }
+            return channels.filter(ch => ch.url && ch.url.trim());
+        } catch (e) {
+            throw new Error(`Invalid JSON: ${e.message}`);
+        }
+    }
+
+    function parseXMLTV(content) {
+        const parser = new DOMParser();
+        const xmlDoc = parser.parseFromString(content, 'text/xml');
+        const parseError = xmlDoc.querySelector('parsererror');
+        if (parseError) throw new Error('Invalid XMLTV XML');
+
+        const channels = [];
+        // Find all <channel> elements
+        const channelElems = xmlDoc.querySelectorAll('channel');
+        for (const ch of channelElems) {
+            const id = ch.getAttribute('id') || '';
+            const displayNameElem = ch.querySelector('display-name');
+            let name = displayNameElem ? displayNameElem.textContent : id;
+            // Look for a <url> inside channel (sometimes present)
+            let urlElem = ch.querySelector('url');
+            let url = urlElem ? urlElem.textContent : '';
+            // If no url, maybe the channel id is a URL?
+            if (!url && (id.startsWith('http://') || id.startsWith('https://'))) {
+                url = id;
+            }
+            if (url && (url.startsWith('http://') || url.startsWith('https://'))) {
+                channels.push({ name, url });
+            }
+        }
+        // Also try to extract programme urls if any? Not standard, but some XMLTV extensions include <url> in programme.
+        const programmes = xmlDoc.querySelectorAll('programme');
+        for (const prog of programmes) {
+            const urlElem = prog.querySelector('url');
+            if (urlElem && urlElem.textContent) {
+                const url = urlElem.textContent;
+                const titleElem = prog.querySelector('title');
+                const name = titleElem ? titleElem.textContent : 'Programme Stream';
+                if (url && (url.startsWith('http://') || url.startsWith('https://'))) {
+                    channels.push({ name, url });
+                }
+            }
+        }
+        return channels;
+    }
+
+    // ----- Main processing -----
+    async function loadAndParse() {
+        const statusDiv = document.getElementById('status');
+        const resultsDiv = document.getElementById('results');
+        const paramInfoDiv = document.getElementById('paramInfo');
+        const allChannels = []; // { name, url, source }
+
+        // Check for xmltv query parameter
+        const urlParams = new URLSearchParams(window.location.search);
+        const xmltvUrl = urlParams.get('xmltv');
+        if (xmltvUrl) {
+            paramInfoDiv.innerHTML = `📺 XMLTV source detected: <code>${escapeHtml(xmltvUrl)}</code> (will be parsed)`;
+        } else {
+            paramInfoDiv.innerHTML = `ℹ️ Add <code>?xmltv=URL</code> to also parse an XMLTV file.`;
+        }
+
+        // Process the three fixed sources
+        for (const src of SOURCES) {
+            statusDiv.innerHTML = `<span class="loader"></span> Fetching ${src.name}...`;
+            try {
+                const raw = await fetchViaProxy(src.url);
+                statusDiv.innerHTML = `<span class="loader"></span> Parsing ${src.name}...`;
+                let channels;
+                if (src.parser === 'm3u') {
+                    channels = parseM3U(raw);
+                } else if (src.parser === 'json') {
+                    channels = parseJSON(raw);
+                } else {
+                    continue;
+                }
+                for (const ch of channels) {
+                    allChannels.push({ ...ch, source: src.name });
+                }
+                statusDiv.innerHTML = `✅ ${src.name}: ${channels.length} channels found.`;
+                await new Promise(r => setTimeout(r, 500));
+            } catch (err) {
+                console.error(`Error with ${src.name}:`, err);
+                statusDiv.innerHTML = `❌ ${src.name} failed: ${err.message}`;
+            }
+        }
+
+        // Process XMLTV if provided
+        if (xmltvUrl) {
+            statusDiv.innerHTML = `<span class="loader"></span> Fetching XMLTV from ${escapeHtml(xmltvUrl)}...`;
+            try {
+                const rawXml = await fetchViaProxy(xmltvUrl);
+                statusDiv.innerHTML = `<span class="loader"></span> Parsing XMLTV...`;
+                const xmlChannels = parseXMLTV(rawXml);
+                for (const ch of xmlChannels) {
+                    allChannels.push({ ...ch, source: `XMLTV (${xmltvUrl})` });
+                }
+                statusDiv.innerHTML = `✅ XMLTV: ${xmlChannels.length} channels found.`;
+            } catch (err) {
+                statusDiv.innerHTML = `❌ XMLTV failed: ${err.message}`;
+            }
+        }
+
+        // Display combined results
+        if (allChannels.length === 0) {
+            resultsDiv.innerHTML = '<div class="error">No channels were extracted from any source.</div>';
+        } else {
+            let html = '<h3>Extracted Channels</h3>点伽<thead>起源<th>#</th><th>Source</th><th>Channel Name</th><th>Stream URL</th></tr></thead><tbody>';
+            allChannels.forEach((ch, idx) => {
+                html += `点缘
+                            点<${idx+1}点>
+                            点<${escapeHtml(ch.source)}点>
+                            点<${escapeHtml(ch.name)}点>
+                            <td class="channel-url"><a href="${escapeHtml(ch.url)}" target="_blank" rel="noopener">${escapeHtml(ch.url)}</a>点>
+                          </tr>`;
+            });
+            html += '</tbody></table>';
+            resultsDiv.innerHTML = html;
+        }
+        statusDiv.innerHTML = `✅ Done. Total channels: ${allChannels.length}`;
+    }
+
+    function escapeHtml(str) {
+        if (!str) return '';
+        return str.replace(/[&<>]/g, function(m) {
+            if (m === '&') return '&amp;';
+            if (m === '<') return '&lt;';
+            if (m === '>') return '&gt;';
+            return m;
+        });
+    }
+
+    window.addEventListener('load', loadAndParse);
+</script>
+</body>
+</html>
